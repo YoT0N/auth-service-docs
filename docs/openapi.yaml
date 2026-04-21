@@ -1,0 +1,252 @@
+openapi: 3.0.3
+info:
+  title: Auth Service API
+  description: |
+    API надає контракт для мікросервісу автентифікації та авторизації користувачів.
+    Сервіс є внутрішнім і використовується SPA-клієнтом та іншими мікросервісами через API Gateway.
+    
+    Всі захищені ендпоінти вимагають Bearer токен у заголовку Authorization.
+  version: "1.0.0"
+  contact:
+    name: Ільків Богдан
+
+servers:
+  - url: https://api.example.com
+    description: Production
+  - url: https://staging.api.example.com
+    description: Staging
+  - url: http://localhost:3000
+    description: Local development
+
+tags:
+  - name: auth
+    description: Операції автентифікації та авторизації
+
+paths:
+  /api/auth/register:
+    post:
+      tags: [auth]
+      summary: Реєстрація нового користувача
+      description: |
+        Приймає дані користувача (email, пароль), перевіряє унікальність email,
+        хешує пароль через bcrypt (cost factor 12), зберігає запис у БД.
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: user@example.com
+              password: SecurePass123!
+      responses:
+        '201':
+          description: Користувача успішно зареєстровано
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: Автентифікація користувача
+      description: |
+        Перевіряє облікові дані, генерує пару токенів (access: 15 хв, refresh: 7 днів),
+        зберігає refresh токен у Redis.
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: user@example.com
+              password: SecurePass123!
+      responses:
+        '200':
+          description: Успішна автентифікація
+          headers:
+            Set-Cookie:
+              description: HttpOnly cookie з refresh токеном
+              schema:
+                type: string
+                example: refresh_token=eyJ...; HttpOnly; Secure; SameSite=Strict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Оновлення access токена
+      description: |
+        Приймає refresh токен (через HttpOnly cookie), перевіряє його валідність у Redis,
+        інвалідує старий токен та генерує нову пару (Refresh Token Rotation).
+      operationId: refreshToken
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Нова пара токенів
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: Вихід із системи
+      description: Видаляє refresh токен з Redis, унеможливлюючи подальше оновлення сесії.
+      operationId: logoutUser
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Успішний вихід, тіло відповіді відсутнє
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/verify:
+    get:
+      tags: [auth]
+      summary: Перевірка валідності access токена
+      description: |
+        Внутрішній ендпоінт для перевірки валідності access токена іншими мікросервісами
+        через API Gateway.
+      operationId: verifyToken
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Токен валідний
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          description: Email користувача (унікальний)
+          example: user@example.com
+        password:
+          type: string
+          minLength: 8
+          description: Пароль (мінімум 8 символів)
+          example: SecurePass123!
+
+    RegisterResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Користувача успішно зареєстровано
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: user@example.com
+        password:
+          type: string
+          example: SecurePass123!
+
+    LoginResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT access токен (RS256, TTL 15 хв)
+          example: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+
+    VerifyResponse:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440000
+        email:
+          type: string
+          format: email
+          example: user@example.com
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Код помилки
+        message:
+          type: string
+          description: Опис помилки
+
+  responses:
+    BadRequest:
+      description: Невалідні дані запиту
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: VALIDATION_ERROR
+            message: Email має бути валідною адресою
+
+    Unauthorized:
+      description: Невалідні або відсутні облікові дані
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: UNAUTHORIZED
+            message: Невалідний або прострочений токен
+
+    Conflict:
+      description: Конфлікт — ресурс вже існує
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: CONFLICT
+            message: Користувач з таким email вже існує
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access токен у форматі Bearer
+
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: HttpOnly cookie з refresh токеном
